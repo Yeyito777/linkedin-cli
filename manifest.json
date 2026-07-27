@@ -1,0 +1,17 @@
+{
+  "name": "linkedin",
+  "bin": "./bin/linkedin",
+  "systemHint": "You have LinkedIn access through `linkedin`. Run `linkedin -h` for usage. This tool uses the user's pasted LinkedIn session cookie and makes direct HTTPS requests; it does not control a browser. Profile mutations preview by default and require --yes.",
+  "display": {
+    "label": "LinkedIn",
+    "color": "#0A66C2"
+  },
+  "shell": {
+    "literalArgs": [
+      { "subcommand": "education", "kind": "flag", "flag": "--degree" },
+      { "subcommand": "education", "kind": "flag", "flag": "--field" },
+      { "subcommand": "education", "kind": "flag", "flag": "--activities" },
+      { "subcommand": "education", "kind": "flag", "flag": "--description" }
+    ]
+  }
+}
