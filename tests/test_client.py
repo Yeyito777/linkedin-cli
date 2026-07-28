@@ -101,6 +101,10 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(payload["dateRange"]["start"], {"year": 2025, "month": 9})
         with self.assertRaises(LinkedInError):
             education_update_payload(entity, start="2029-09", end="2025-06")
+        payload = education_update_payload(entity, organization_id="26225186")
+        self.assertEqual(payload["companyUrn"], "urn:li:fsd_company:26225186")
+        with self.assertRaises(LinkedInError):
+            education_update_payload(entity, organization_id="not-an-id")
 
 
 if __name__ == "__main__":

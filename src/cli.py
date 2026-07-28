@@ -175,7 +175,7 @@ def command_education_update(args: argparse.Namespace) -> None:
     payload = education_update_payload(
         entity, start=args.start, end=args.end, degree=args.degree,
         field=args.field, grade=args.grade, activities=args.activities,
-        description=args.description,
+        description=args.description, organization_id=args.organization_id,
     )
     preview = {
         "education_id": education_id(entity),
@@ -184,6 +184,7 @@ def command_education_update(args: argparse.Namespace) -> None:
             "start": args.start, "end": args.end, "degree": args.degree,
             "field": args.field, "grade": args.grade,
             "activities": args.activities, "description": args.description,
+            "organization_id": args.organization_id,
         }.items() if value is not None},
     }
     if not preview["changes"]:
@@ -259,6 +260,10 @@ def parser() -> argparse.ArgumentParser:
     education_update.add_argument("--grade")
     education_update.add_argument("--activities")
     education_update.add_argument("--description")
+    education_update.add_argument(
+        "--organization-id",
+        help="associate the entry with a numeric LinkedIn company ID (enables its logo)",
+    )
     education_update.add_argument("--json", action="store_true", help="emit a JSON preview")
     education_update.add_argument("--yes", action="store_true", help="apply the proposed update")
     education_update.set_defaults(func=command_education_update)

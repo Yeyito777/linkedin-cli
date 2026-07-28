@@ -52,7 +52,7 @@ linkedin status [--json]
 linkedin me [--json] [--raw]
 linkedin profile show [PERSON] [--json] [--raw]
 linkedin connection list [-q QUERY] [-n LIMIT] [--json] [--raw]
-linkedin education update ID [fields] [--yes]
+linkedin education update ID [fields] [--organization-id COMPANY_ID] [--yes]
 linkedin invitations [-n LIMIT] [--start N] [--json] [--raw]
 linkedin api /voyager/api/...       # advanced, GET-only escape hatch
 ```
@@ -74,6 +74,11 @@ Education changes are previews unless `--yes` is supplied:
 linkedin education update 123456 --start 2025-09 --end 2029-06 \
   --degree "Bachelor of Science" --field "Mathematics and Physics"
 ```
+
+Use `--organization-id` when an education entry needs to be associated with an
+official LinkedIn organization page that the school autocomplete does not
+surface. The numeric company ID can be found in that page's LinkedIn URN. This
+association allows LinkedIn to display the organization's logo.
 
 ## Development
 

@@ -524,6 +524,7 @@ def education_update_payload(
     entity: dict[str, Any], *, start: str | None = None, end: str | None = None,
     degree: str | None = None, field: str | None = None, grade: str | None = None,
     activities: str | None = None, description: str | None = None,
+    organization_id: str | None = None,
 ) -> dict[str, Any]:
     def parse_month(value: str | None, label: str) -> dict[str, int] | None:
         if value is None:
@@ -538,10 +539,13 @@ def education_update_payload(
     end_value = parse_month(end, "--end") if end is not None else old_range.get("end")
     if start_value and end_value and (start_value["year"], start_value.get("month", 0)) > (end_value["year"], end_value.get("month", 0)):
         raise LinkedInError("education start date cannot be after its end date")
+    if organization_id is not None and not re.fullmatch(r"\d+", organization_id):
+        raise LinkedInError("--organization-id must be a numeric LinkedIn company ID")
     payload = {
         "schoolName": entity.get("schoolName"),
         "schoolUrn": entity.get("schoolUrn"),
-        "companyUrn": entity.get("companyUrn"),
+        "companyUrn": (f"urn:li:fsd_company:{organization_id}"
+                       if organization_id is not None else entity.get("companyUrn")),
         "degreeName": entity.get("degreeName") if degree is None else degree,
         "degreeUrn": entity.get("degreeUrn"),
         "fieldOfStudy": entity.get("fieldOfStudy") if field is None else field,
