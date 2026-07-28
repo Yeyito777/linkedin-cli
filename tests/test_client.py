@@ -3,7 +3,7 @@ import stat
 import tempfile
 import unittest
 
-from src.client import LinkedInError, connection_summaries, education_id, education_update_payload, full_profile_summary, me_summary, normalize_profile_identity, parse_cookie_input, save_session, session_path
+from src.client import LinkedInError, connection_summaries, education_id, education_update_payload, full_profile_summary, image_file_info, me_summary, normalize_profile_identity, parse_cookie_input, save_session, session_path
 
 
 class ClientTests(unittest.TestCase):
@@ -51,6 +51,18 @@ class ClientTests(unittest.TestCase):
                     os.environ.pop("LINKEDIN_CONFIG_DIR", None)
                 else:
                     os.environ["LINKEDIN_CONFIG_DIR"] = old
+
+    def test_image_file_info(self):
+        with tempfile.TemporaryDirectory() as directory:
+            png = os.path.join(directory, "banner.png")
+            with open(png, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+            self.assertEqual(image_file_info(png)["content_type"], "image/png")
+            bad = os.path.join(directory, "banner.jpg")
+            with open(bad, "wb") as handle:
+                handle.write(b"not a jpeg")
+            with self.assertRaises(LinkedInError):
+                image_file_info(bad)
 
     def test_full_profile_summary(self):
         payload = {"included": [

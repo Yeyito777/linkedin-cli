@@ -9,7 +9,7 @@ from typing import Any
 
 from .client import (
     Client, LinkedInError, connection_summaries, education_id, education_update_payload,
-    full_profile_summary, internal_profile_id, me_summary, mini_profiles,
+    full_profile_summary, image_file_info, internal_profile_id, me_summary, mini_profiles,
     parse_cookie_input, save_session, session_path,
 )
 
@@ -208,6 +208,60 @@ def command_education_update(args: argparse.Namespace) -> None:
     print(f"Updated. Education ID: {education_id(entity)}")
 
 
+def command_background_update(args: argparse.Namespace) -> None:
+    info = image_file_info(args.image)
+    preview = {
+        "image": str(info["path"]),
+        "content_type": info["content_type"],
+        "bytes": info["size"],
+    }
+    if not args.yes:
+        if args.json:
+            emit_json({"preview": True, **preview})
+        else:
+            print("Proposed profile background update:")
+            print(f"  Image: {preview['image']}")
+            print(f"  Type:  {preview['content_type']}")
+            print(f"  Size:  {preview['bytes']} bytes")
+            print("\nNo changes made. Run again with --yes to apply.")
+        return
+    Client().update_background_image(info["path"])
+    print("Updated profile background image.")
+
+
+def command_project_delete(args: argparse.Namespace) -> None:
+    client = Client()
+    profile = full_profile_summary(client.own_profile())
+    projects = profile.get("sections", {}).get("projects", [])
+    matches = [project for project in projects if (
+        str(project.get("entityUrn", "")).endswith(f",{args.project})")
+        or str(project.get("title", "")).casefold() == args.project.casefold()
+    )]
+    if len(matches) != 1:
+        choices = ", ".join(
+            f"{str(project.get('entityUrn', '')).rsplit(',', 1)[-1].rstrip(')')} ({project.get('title')})"
+            for project in projects
+        ) or "none"
+        raise LinkedInError(
+            f"project '{args.project}' was not uniquely found. Available: {choices}"
+        )
+    project = matches[0]
+    preview = {
+        "project_id": str(project["entityUrn"]).rsplit(",", 1)[-1].rstrip(")"),
+        "title": project.get("title"),
+        "entity_urn": project.get("entityUrn"),
+    }
+    if not args.yes:
+        if args.json:
+            emit_json({"preview": True, **preview})
+        else:
+            print(f"Proposed project deletion: {preview['title']} ({preview['project_id']})")
+            print("\nNo changes made. Run again with --yes to apply.")
+        return
+    client.delete_project(str(preview["entity_urn"]))
+    print(f"Deleted. Project ID: {preview['project_id']}")
+
+
 def command_api(args: argparse.Namespace) -> None:
     emit_json(Client().get(args.path))
 
@@ -267,6 +321,20 @@ def parser() -> argparse.ArgumentParser:
     education_update.add_argument("--json", action="store_true", help="emit a JSON preview")
     education_update.add_argument("--yes", action="store_true", help="apply the proposed update")
     education_update.set_defaults(func=command_education_update)
+    background = sub.add_parser("background", help="manage the profile background image")
+    background_sub = background.add_subparsers(dest="background_command", required=True)
+    background_update = background_sub.add_parser("update", help="preview or upload a profile background image")
+    background_update.add_argument("image", help="PNG or JPEG file, up to 8 MiB")
+    background_update.add_argument("--json", action="store_true", help="emit a JSON preview")
+    background_update.add_argument("--yes", action="store_true", help="upload and apply the image")
+    background_update.set_defaults(func=command_background_update)
+    project = sub.add_parser("project", help="manage profile projects")
+    project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_delete = project_sub.add_parser("delete", help="preview or delete a project")
+    project_delete.add_argument("project", help="project ID or exact title")
+    project_delete.add_argument("--json", action="store_true", help="emit a JSON preview")
+    project_delete.add_argument("--yes", action="store_true", help="delete the project")
+    project_delete.set_defaults(func=command_project_delete)
     api = sub.add_parser("api", help="advanced read-only GET to a /voyager/api/ endpoint")
     api.add_argument("path", help="absolute /voyager/api/... path")
     api.set_defaults(func=command_api)

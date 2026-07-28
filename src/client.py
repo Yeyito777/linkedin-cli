@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.cookiejar
 import html
 import json
+import mimetypes
 import os
 import re
 import urllib.error
@@ -190,6 +191,128 @@ class Client:
     def own_profile(self) -> dict[str, Any]:
         return self.profile()
 
+    def _profile_context(self) -> tuple[dict[str, Any], str, str]:
+        payload = self.own_profile()
+        profile = next(
+            (item for item in payload.get("included", [])
+             if str(item.get("$type", "")).endswith(".Profile")),
+            None,
+        )
+        if not profile:
+            raise LinkedInError("LinkedIn's profile response did not contain the current profile")
+        profile_id = internal_profile_id(profile)
+        version_tag = str(profile.get("versionTag") or "")
+        if not profile_id or not version_tag:
+            raise LinkedInError("could not determine the current profile ID and version")
+        return profile, profile_id, version_tag
+
+    def _curl_session(self):
+        try:
+            from curl_cffi import requests as curl_requests
+        except ImportError:
+            raise LinkedInError("curl_cffi is required for mutations; install requirements.txt") from None
+        session = curl_requests.Session(impersonate="chrome")
+        session.cookies.update(self.cookies)
+        return session
+
+    def _versioned_headers(self, profile: dict[str, Any]) -> dict[str, str]:
+        headers = self._headers()
+        headers.pop("Cookie", None)
+        headers["Content-Type"] = "application/json"
+        tracking_id = str(profile.get("trackingId") or "")
+        headers["x-li-page-instance"] = (
+            "urn:li:page:d_flagship3_profile_self_edit_top_card;" + tracking_id
+        )
+        return headers
+
+    def register_media_upload(self, path: Path, media_upload_type: str) -> dict[str, Any]:
+        info = image_file_info(path)
+        payload = self.request(
+            "POST",
+            "/voyager/api/voyagerMediaUploadMetadata",
+            params={"action": "upload"},
+            data={
+                "mediaUploadType": media_upload_type,
+                "fileSize": info["size"],
+                "filename": path.name,
+            },
+        )
+        try:
+            metadata = payload["data"]["value"]
+            upload_url = metadata["singleUploadUrl"]
+            urn = metadata["urn"]
+        except (KeyError, TypeError):
+            raise LinkedInError("LinkedIn returned incomplete media upload metadata") from None
+        if not str(urn).startswith("urn:li:digitalmediaAsset:") or not str(upload_url).startswith("https://"):
+            raise LinkedInError("LinkedIn returned invalid media upload metadata")
+        return metadata
+
+    def upload_registered_media(self, path: Path, metadata: dict[str, Any]) -> None:
+        info = image_file_info(path)
+        headers = {
+            **{str(k): str(v) for k, v in (metadata.get("singleUploadHeaders") or {}).items()},
+            "Content-Type": info["content_type"],
+            "Content-Length": str(info["size"]),
+        }
+        response = self._curl_session().put(
+            metadata["singleUploadUrl"], headers=headers,
+            data=path.read_bytes(), timeout=30,
+        )
+        if response.status_code not in {200, 201}:
+            raise LinkedInError(f"LinkedIn media upload returned HTTP {response.status_code}")
+
+    def update_background_image(self, image_path: str | Path) -> dict[str, str]:
+        path = Path(image_path).expanduser().resolve()
+        image_file_info(path)
+        uploaded: dict[str, str] = {}
+        for label, media_type in (
+            ("original", "PROFILE_ORIGINAL_BACKGROUND"),
+            ("display", "PROFILE_DISPLAY_BACKGROUND"),
+        ):
+            metadata = self.register_media_upload(path, media_type)
+            self.upload_registered_media(path, metadata)
+            uploaded[label] = str(metadata["urn"])
+
+        profile, profile_id, version_tag = self._profile_context()
+        body = {
+            "patch": {
+                "backgroundPicture": {
+                    "$set": {
+                        "originalImage": uploaded["original"],
+                        "displayImage": uploaded["display"],
+                    }
+                }
+            }
+        }
+        response = self._curl_session().post(
+            f"{BASE}/voyager/api/identity/normProfiles/{profile_id}",
+            params={"versionTag": version_tag},
+            headers=self._versioned_headers(profile), json=body, timeout=30,
+        )
+        if response.status_code not in {200, 202}:
+            detail = re.sub(r"\s+", " ", response.text[:500]).strip()
+            raise LinkedInError(
+                f"LinkedIn background update returned HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+            )
+        return uploaded
+
+    def delete_project(self, entity_urn: str) -> None:
+        if not re.fullmatch(r"urn:li:fsd_profileProject:\([^,]+,\d+\)", entity_urn):
+            raise LinkedInError("invalid LinkedIn project URN")
+        profile, _, version_tag = self._profile_context()
+        response = self._curl_session().delete(
+            f"{BASE}/voyager/api/identity/dash/profileProjects/{entity_urn}",
+            params={"versionTag": version_tag},
+            headers=self._versioned_headers(profile), timeout=30,
+        )
+        if response.status_code != 204:
+            detail = re.sub(r"\s+", " ", response.text[:500]).strip()
+            raise LinkedInError(
+                f"LinkedIn project deletion returned HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+            )
+
     def connections(self, count: int = 40, start: int = 0) -> dict[str, Any]:
         return self.get(
             "/voyager/api/relationships/dash/connections",
@@ -341,6 +464,29 @@ def mini_profiles(payload: dict[str, Any]) -> list[dict[str, Any]]:
         item for item in payload.get("included", [])
         if str(item.get("$type", "")).endswith("MiniProfile")
     ]
+
+
+def image_file_info(value: str | Path) -> dict[str, Any]:
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise LinkedInError(f"image file not found: {path}")
+    size = path.stat().st_size
+    if size == 0:
+        raise LinkedInError("image file is empty")
+    if size > 8 * 1024 * 1024:
+        raise LinkedInError("image must be no larger than 8 MiB")
+    with path.open("rb") as handle:
+        signature = handle.read(16)
+    if signature.startswith(b"\x89PNG\r\n\x1a\n"):
+        content_type = "image/png"
+    elif signature.startswith(b"\xff\xd8\xff"):
+        content_type = "image/jpeg"
+    else:
+        guessed = mimetypes.guess_type(path.name)[0]
+        if guessed not in {"image/png", "image/jpeg"}:
+            raise LinkedInError("image must be a PNG or JPEG file")
+        raise LinkedInError(f"file contents do not match {guessed}")
+    return {"path": path, "size": size, "content_type": content_type}
 
 
 def me_summary(payload: dict[str, Any]) -> dict[str, Any]:

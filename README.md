@@ -53,6 +53,8 @@ linkedin me [--json] [--raw]
 linkedin profile show [PERSON] [--json] [--raw]
 linkedin connection list [-q QUERY] [-n LIMIT] [--json] [--raw]
 linkedin education update ID [fields] [--organization-id COMPANY_ID] [--yes]
+linkedin background update IMAGE [--yes]
+linkedin project delete ID_OR_EXACT_TITLE [--yes]
 linkedin invitations [-n LIMIT] [--start N] [--json] [--raw]
 linkedin api /voyager/api/...       # advanced, GET-only escape hatch
 ```
@@ -79,6 +81,20 @@ Use `--organization-id` when an education entry needs to be associated with an
 official LinkedIn organization page that the school autocomplete does not
 surface. The numeric company ID can be found in that page's LinkedIn URN. This
 association allows LinkedIn to display the organization's logo.
+
+Background-image updates and project deletions also preview by default:
+
+```bash
+linkedin background update ~/Pictures/linkedin-banner.png
+linkedin background update ~/Pictures/linkedin-banner.png --yes
+
+linkedin project delete "Old project title"
+linkedin project delete "Old project title" --yes
+```
+
+Background updates use LinkedIn's authenticated media-registration flow and
+signed binary upload URLs directly. PNG and JPEG images up to 8 MiB are
+accepted; the CLI does not open or control a browser.
 
 ## Development
 
