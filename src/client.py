@@ -9,6 +9,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -224,6 +225,187 @@ class Client:
             "urn:li:page:d_flagship3_profile_self_edit_top_card;" + tracking_id
         )
         return headers
+
+    def _position_form_session(
+        self, vanity_name: str, position_id: str,
+    ) -> tuple[Any, str, dict[str, Any], dict[str, str]]:
+        session = self._curl_session()
+        form_url = f"{BASE}/in/{vanity_name}/details/experience/edit/forms/{position_id}"
+        response = session.get(form_url, timeout=30)
+        if response.status_code != 200:
+            raise LinkedInError(f"LinkedIn experience form returned HTTP {response.status_code}")
+        context_match = re.search(r'<meta name="como-t" content="([^"]+)">', response.text)
+        try:
+            context = json.loads(html.unescape(context_match.group(1))) if context_match else {}
+        except json.JSONDecodeError:
+            context = {}
+        headers = self._headers()
+        headers.pop("Cookie", None)
+        current_jsession = session.cookies.get("JSESSIONID")
+        if current_jsession:
+            headers["csrf-token"] = current_jsession.strip('"')
+        page_key = "d_flagship3_profile_self_edit_position"
+        headers.update({
+            "Accept": "*/*", "Content-Type": "application/json", "Origin": BASE,
+            "Referer": form_url, "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin", "x-li-rsc-stream": "true",
+            "x-li-anchor-page-key": page_key,
+            "x-li-page-instance-tracking-id": context.get("trackingId", ""),
+            "x-li-application-instance": context.get("appTrackingId", ""),
+            "x-li-application-version": context.get("serviceVersion", ""),
+            "x-li-page-instance": f"urn:li:page:{page_key};{context.get('trackingId', '')}",
+        })
+        return session, form_url, context, headers
+
+    def _sdui_request(
+        self, session: Any, headers: dict[str, str], request_id: str,
+        server_request: dict[str, Any], states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        requested = server_request["requestedArguments"]
+        body = {
+            "requestId": request_id,
+            "serverRequest": server_request,
+            "states": states,
+            "requestedArguments": {
+                **requested, "states": states,
+                "screenId": "com.linkedin.sdui.flagshipnav.profile.ProfilePositionDetailsEditForm",
+            },
+        }
+        url = BASE + "/flagship-web/rsc-action/actions/server-request?sduiid=" + urllib.parse.quote(request_id)
+        response = session.post(url, headers=headers, json=body, timeout=30)
+        if response.status_code != 200:
+            detail = re.sub(r"\s+", " ", response.text[:500]).strip()
+            raise LinkedInError(
+                f"LinkedIn experience media request returned HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+            )
+        result = parse_rsc_response(response.text)
+        errors = result.get("response", {}).get("errors") or []
+        if errors:
+            raise LinkedInError(f"LinkedIn rejected the experience media request: {errors[0]}")
+        return result
+
+    def add_position_image(
+        self, position: dict[str, Any], profile: dict[str, Any], image_path: str | Path,
+    ) -> str:
+        """Upload an image and attach it as media to an existing experience."""
+        path = Path(image_path).expanduser().resolve()
+        info = image_file_info(path)
+        position_id_value = position_id(position)
+        profile_id = internal_profile_id(profile)
+        vanity_name = profile.get("publicIdentifier")
+        if not position_id_value or not profile_id or not vanity_name:
+            raise LinkedInError("could not determine the profile and experience IDs")
+
+        session, _, _, headers = self._position_form_session(vanity_name, position_id_value)
+        pointer = uuid.uuid4().hex[:10]
+        prefix = f"auto-binding-{uuid.uuid4()}ProfilePositionForm"
+        media_file = {
+            "$type": "proto.sdui.media.MediaFile", "mediaFileId": pointer,
+            "filePointer": pointer, "mimeType": info["content_type"],
+            "size": str(info["size"]), "fileName": path.name,
+            "source": {"$case": "localFile", "localFile": {
+                "$type": "proto.sdui.media.LocalFile", "filePointer": pointer,
+                "mimeType": info["content_type"], "size": str(info["size"]),
+                "fileName": path.name, "shouldIncludeFileContents": False,
+                "fileContents": "",
+            }},
+            "thumbnails": [], "captions": [], "mediaAttributions": [],
+        }
+        ref = lambda key: {"key": key, "namespace": "MemoryNamespace"}
+        followup_data = {
+            "profileId": profile_id, "entityId": position_id_value,
+            "vanityName": vanity_name, "assetUrns": ref("position-mediaAssetUrns"),
+            "allMediaIds": ref("position-existingMediaId"),
+            "mediaList": ref("position-mediaList"),
+            "ingestedContentIds": ref("position-ingestedIds"),
+            "uploadedDocumentList": ref("position-uploadedDocumentList"),
+            "uploadedDocumentIds": ref("position-uploadedDocumentIds"),
+            "existingMedia": [], "hasChanges": ref("isActiveProfileFormHasChangesProfileEditForm"),
+            "hasExistingProfileSkills": True, "formIdPrefix": prefix,
+            "sortedMediaIds": ref("position-mediaIds"),
+            "isLoading": ref("isActiveProfileFormLoadingProfileEditForm"),
+            "careerBreakAssociatedOrganizations": [{}],
+            "mediaFileIdToIngestedContentMap": ref("position-fileIdToIngestedContentMap"),
+            "ingestedMediaIdToBindingIdMap": ref("position-ingestedMediaIdToBindingIdMap"),
+        }
+        media_keys = ["position-mediaAssetUrns", "position-existingMediaId", "position-mediaList",
+                      "position-ingestedIds", "position-uploadedDocumentList",
+                      "position-uploadedDocumentIds", "position-mediaIds",
+                      "position-fileIdToIngestedContentMap", "position-ingestedMediaIdToBindingIdMap"]
+        requested = {
+            "$type": "proto.sdui.actions.requests.RequestedArguments",
+            "requestedStateKeys": [_requested_state(key) for key in ("position-mediaList", "position-mediaAssetUrns")],
+            "payload": {
+                "profileId": profile_id, "newMedia": ref("position-mediaList"),
+                "assetUrns": ref("position-mediaAssetUrns"),
+                "useCase": "ImageAssetUseCase_PROFILE_TREASURY_IMAGE",
+                "isLoading": ref("isActiveProfileFormLoadingProfileEditForm"),
+                "followUpRequest": {
+                    "key": "com.linkedin.sdui.impl.profile.components.forms.uploadPositionMedia",
+                    "data": followup_data,
+                    "stateKeys": [ref(key) for key in media_keys],
+                },
+            },
+            "requestMetadata": {"$type": "proto.sdui.common.RequestMetadata"},
+        }
+        initial_states = [
+            _state("position-mediaList", {"$type": "proto.sdui.media.MediaList", "mediaFiles": [media_file]}, "mediaListValue"),
+            _state("position-mediaAssetUrns", [], "stringListValue"),
+        ]
+        request_id = "com.linkedin.sdui.requests.profile.profileMediaRegister"
+        register = self._sdui_request(session, headers, request_id, {
+            "requestId": request_id, "requestedArguments": requested,
+            "onClientRequestFailureAction": {"actions": []}, "isApfcEnabled": False,
+            "isStreaming": False, "rumPageKey": "",
+        }, initial_states)
+        upload_action = find_sdui_action(register, "UploadMedia")
+        if not upload_action:
+            raise LinkedInError("LinkedIn did not return media upload instructions")
+        try:
+            instruction = upload_action["value"]["uploadInstructions"][0]
+            asset = instruction["assetUrn"]
+            single = instruction["uploadInstructions"]["ingestionOperations"][0]["uploadInstruction"]["instruction"]["singleRequestUploadInstruction"]
+            upload_url = single["uploadUrl"]
+            upload_headers = {item["key"]: item["value"] for item in single.get("uploadHeaders", [])}
+            followup = next(
+                action["value"] for action in upload_action["value"]["onSuccess"]["actions"]
+                if str(action.get("$type", "")).endswith(".ServerRequest")
+            )
+        except (KeyError, IndexError, StopIteration, TypeError):
+            raise LinkedInError("LinkedIn returned incomplete media upload instructions") from None
+        upload_headers["Content-Type"] = info["content_type"]
+        upload = session.put(upload_url, headers=upload_headers, data=path.read_bytes(), timeout=30)
+        if upload.status_code not in {200, 201}:
+            raise LinkedInError(f"LinkedIn media upload returned HTTP {upload.status_code}")
+
+        empty_media = {"$type": "proto.sdui.media.MediaList", "mediaFiles": []}
+        followup_states = [
+            _state("position-mediaAssetUrns", [asset], "stringListValue"),
+            _state("position-existingMediaId", [], "stringListValue"),
+            _state("position-mediaList", {"$type": "proto.sdui.media.MediaList", "mediaFiles": [media_file]}, "mediaListValue"),
+            _state("position-ingestedIds", [], "stringListValue"),
+            _state("position-uploadedDocumentList", empty_media, "mediaListValue"),
+            _state("position-uploadedDocumentIds", [], "stringListValue"),
+            _state("position-mediaIds", [], "expression"),
+            _state("position-fileIdToIngestedContentMap", [], "stringListValue"),
+            _state("position-ingestedMediaIdToBindingIdMap", [], "stringListValue"),
+        ]
+        followup_result = self._sdui_request(
+            session, headers, followup["requestId"], followup, followup_states,
+        )
+        save_request = find_sdui_action(followup_result, "ServerRequest")
+        if not save_request:
+            raise LinkedInError("LinkedIn did not return the final experience save request")
+        save = save_request["value"]
+        save_states = position_save_states(
+            save["requestedArguments"]["payload"], position, profile, media_file, asset,
+        )
+        final = self._sdui_request(session, headers, save["requestId"], save, save_states)
+        # Failure handlers are serialized alongside successful SDUI responses,
+        # so nested ServerRequest actions are not themselves evidence of failure.
+        # _sdui_request has already validated the response's actual error list.
+        return str(asset)
 
     def register_media_upload(self, path: Path, media_upload_type: str) -> dict[str, Any]:
         info = image_file_info(path)
@@ -489,6 +671,93 @@ def image_file_info(value: str | Path) -> dict[str, Any]:
     return {"path": path, "size": size, "content_type": content_type}
 
 
+def parse_rsc_response(text: str) -> dict[str, Any]:
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        _, value = line.split(":", 1)
+        if not value.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "response" in parsed:
+            return parsed
+    raise LinkedInError("LinkedIn returned an unrecognized streaming response")
+
+
+def find_sdui_action(value: Any, action_name: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if str(value.get("$type", "")).rsplit(".", 1)[-1] == action_name:
+            return value
+        for child in value.values():
+            found = find_sdui_action(child, action_name)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_sdui_action(child, action_name)
+            if found:
+                return found
+    return None
+
+
+def _requested_state(key: str) -> dict[str, Any]:
+    return {"key": {"value": {"$case": "id", "id": key}}}
+
+
+def _state(key: str, value: Any, proto_case: str) -> dict[str, Any]:
+    return {"key": key, "namespace": "MemoryNamespace", "value": value, "originalProtoCase": proto_case}
+
+
+def position_id(entity: dict[str, Any]) -> str | None:
+    match = re.search(r"profilePosition:\([^,]+,(\d+)\)", str(entity.get("entityUrn", "")))
+    return match.group(1) if match else None
+
+
+def position_save_states(
+    payload: dict[str, Any], position: dict[str, Any], profile: dict[str, Any],
+    media_file: dict[str, Any], asset: str,
+) -> list[dict[str, Any]]:
+    def key(name: str) -> str:
+        reference = payload.get(name)
+        if not isinstance(reference, dict) or not reference.get("key"):
+            raise LinkedInError(f"LinkedIn's save request omitted {name}")
+        return str(reference["key"])
+
+    company_number = _urn_number(position.get("companyUrn"), -1)
+    start = _sdui_date(position.get("dateRange", {}).get("start"))
+    end = _sdui_date(position.get("dateRange", {}).get("end"))
+    current = position.get("dateRange", {}).get("end") is None
+    values = [
+        ("allowProfileEditBroadcasts", False, "booleanValue"),
+        ("title", position.get("title", ""), "stringValue"),
+        ("employmentType", str(_urn_number(position.get("employmentTypeUrn"), 0) or ""), "stringValue"),
+        ("isCompanyRequired", False, "expression"),
+        ("organizationEntityId", {"type": "bigint", "value": str(company_number if company_number >= 0 else 2**64 - 1)}, "longValue"),
+        ("organizationId", company_number, "intValue"),
+        ("companyName", position.get("companyName", ""), "stringValue"),
+        ("startDate", start, "dateValue"), ("endDate", end, "dateValue"),
+        ("description", position.get("description", ""), "stringValue"),
+        ("originalDescription", position.get("description", ""), "stringValue"),
+        ("isCurrentPosition", current, "booleanValue"),
+        ("endCurrentPositionIds", [], "stringListValue"),
+        ("location", position.get("locationName") or position.get("geoLocationName") or "", "stringValue"),
+        ("geoLocationId", _urn_number(position.get("geoUrn"), 0), "intValue"),
+        ("locationType", str(_urn_number(position.get("locationTypeUrn"), 0) or ""), "stringValue"),
+        ("headline", profile.get("headline", ""), "stringValue"),
+        ("shouldDynamicallyCreateHeadline", False, "booleanValue"),
+        ("jobSource", "", "stringValue"), ("showSourceOfHire", False, "booleanValue"),
+        ("skills", [], "stringListValue"),
+        ("uploadedMedia", {"$type": "proto.sdui.media.MediaList", "mediaFiles": [media_file]}, "mediaListValue"),
+        ("uploadedMediaAssetUrns", [asset], "stringListValue"),
+        ("isWevValidated", True, "booleanValue"),
+        ("progressIndicator", True, "booleanValue"),
+    ]
+    return [_state(key(name), value, proto) for name, value, proto in values]
+
+
 def me_summary(payload: dict[str, Any]) -> dict[str, Any]:
     profiles = mini_profiles(payload)
     profile = profiles[0] if profiles else {}
@@ -529,6 +798,16 @@ def _image_url(value: Any) -> str | None:
             segment = artifact.get("fileIdentifyingUrlPathSegment")
             if segment:
                 return vector["rootUrl"] + segment
+    return None
+
+
+def _treasury_image_url(value: Any) -> str | None:
+    vector = value.get("data", {}).get("VectorImage", {}) if isinstance(value, dict) else {}
+    artifacts = vector.get("artifacts") or []
+    if vector.get("rootUrl") and artifacts:
+        artifact = max(artifacts, key=lambda item: (item.get("width", 0), item.get("height", 0)))
+        if artifact.get("fileIdentifyingUrlPathSegment"):
+            return vector["rootUrl"] + artifact["fileIdentifyingUrlPathSegment"]
     return None
 
 
@@ -585,6 +864,17 @@ def full_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
             cleaned["end"] = _date(date_range.get("end"))
             cleaned["current"] = date_range.get("end") is None
             cleaned.pop("dateRange", None)
+        if _type_name(item) == "Position":
+            collection = by_urn.get(item.get("*profileTreasuryMediaPosition"), {})
+            media = []
+            for urn in collection.get("*elements", []):
+                treasury = by_urn.get(urn, {})
+                media.append({
+                    "entity_urn": urn,
+                    "url": _treasury_image_url(treasury),
+                })
+            if media:
+                cleaned["media"] = media
         sections[section].append(cleaned)
 
     return {

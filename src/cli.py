@@ -10,7 +10,7 @@ from typing import Any
 from .client import (
     Client, LinkedInError, connection_summaries, education_id, education_update_payload,
     full_profile_summary, image_file_info, internal_profile_id, me_summary, mini_profiles,
-    parse_cookie_input, save_session, session_path,
+    parse_cookie_input, position_id, save_session, session_path,
 )
 
 
@@ -262,6 +262,39 @@ def command_project_delete(args: argparse.Namespace) -> None:
     print(f"Deleted. Project ID: {preview['project_id']}")
 
 
+def command_experience_media_add(args: argparse.Namespace) -> None:
+    client = Client()
+    raw = client.own_profile()
+    profile = next((item for item in raw.get("included", []) if str(item.get("$type", "")).endswith(".Profile")), None)
+    positions = [item for item in raw.get("included", []) if str(item.get("$type", "")).endswith(".Position")]
+    matches = [item for item in positions if (
+        position_id(item) == args.experience
+        or str(item.get("companyName", "")).casefold() == args.experience.casefold()
+        or str(item.get("title", "")).casefold() == args.experience.casefold()
+    )]
+    if len(matches) != 1:
+        choices = ", ".join(f"{position_id(item)} ({item.get('title')} at {item.get('companyName')})" for item in positions) or "none"
+        raise LinkedInError(f"experience '{args.experience}' was not uniquely found. Available: {choices}")
+    if not profile:
+        raise LinkedInError("LinkedIn's profile response did not contain the current profile")
+    info = image_file_info(args.image)
+    preview = {
+        "experience_id": position_id(matches[0]), "title": matches[0].get("title"),
+        "company": matches[0].get("companyName"), "image": str(info["path"]),
+        "content_type": info["content_type"], "bytes": info["size"],
+    }
+    if not args.yes:
+        if args.json:
+            emit_json({"preview": True, **preview})
+        else:
+            print(f"Proposed media attachment: {preview['title']} at {preview['company']}")
+            print(f"  Image: {preview['image']}\n  Type:  {preview['content_type']}\n  Size:  {preview['bytes']} bytes")
+            print("\nNo changes made. Run again with --yes to apply.")
+        return
+    asset = client.add_position_image(matches[0], profile, info["path"])
+    print(f"Attached image. Experience ID: {preview['experience_id']}; asset: {asset}")
+
+
 def command_api(args: argparse.Namespace) -> None:
     emit_json(Client().get(args.path))
 
@@ -335,6 +368,16 @@ def parser() -> argparse.ArgumentParser:
     project_delete.add_argument("--json", action="store_true", help="emit a JSON preview")
     project_delete.add_argument("--yes", action="store_true", help="delete the project")
     project_delete.set_defaults(func=command_project_delete)
+    experience = sub.add_parser("experience", help="manage experience entries on your profile")
+    experience_sub = experience.add_subparsers(dest="experience_command", required=True)
+    experience_media = experience_sub.add_parser("media", help="manage media attached to an experience")
+    experience_media_sub = experience_media.add_subparsers(dest="experience_media_command", required=True)
+    experience_media_add = experience_media_sub.add_parser("add", help="preview or attach an image to an experience")
+    experience_media_add.add_argument("experience", help="experience ID, exact company, or exact title")
+    experience_media_add.add_argument("image", help="PNG or JPEG file, up to 8 MiB")
+    experience_media_add.add_argument("--json", action="store_true", help="emit a JSON preview")
+    experience_media_add.add_argument("--yes", action="store_true", help="upload and attach the image")
+    experience_media_add.set_defaults(func=command_experience_media_add)
     api = sub.add_parser("api", help="advanced read-only GET to a /voyager/api/ endpoint")
     api.add_argument("path", help="absolute /voyager/api/... path")
     api.set_defaults(func=command_api)

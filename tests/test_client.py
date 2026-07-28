@@ -3,7 +3,7 @@ import stat
 import tempfile
 import unittest
 
-from src.client import LinkedInError, connection_summaries, education_id, education_update_payload, full_profile_summary, image_file_info, me_summary, normalize_profile_identity, parse_cookie_input, save_session, session_path
+from src.client import LinkedInError, connection_summaries, education_id, education_update_payload, find_sdui_action, full_profile_summary, image_file_info, me_summary, normalize_profile_identity, parse_cookie_input, parse_rsc_response, position_id, save_session, session_path
 
 
 class ClientTests(unittest.TestCase):
@@ -64,6 +64,17 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(LinkedInError):
                 image_file_info(bad)
 
+    def test_rsc_response_and_action(self):
+        payload = {"response": {"completionAction": {"actions": [{
+            "$type": "proto.sdui.actions.core.media.UploadMedia", "value": {"id": 1}
+        }]}}}
+        parsed = parse_rsc_response("1:I[]\n0:" + __import__("json").dumps(payload))
+        self.assertEqual(find_sdui_action(parsed, "UploadMedia")["value"]["id"], 1)
+
+    def test_position_id(self):
+        self.assertEqual(position_id({"entityUrn": "urn:li:fsd_profilePosition:(abc,123)"}), "123")
+        self.assertIsNone(position_id({"entityUrn": "urn:li:other:123"}))
+
     def test_full_profile_summary(self):
         payload = {"included": [
             {"$type": "com.linkedin.voyager.dash.identity.profile.Profile",
@@ -79,6 +90,14 @@ class ClientTests(unittest.TestCase):
             {"$type": "com.linkedin.voyager.dash.identity.profile.Education",
              "entityUrn": "urn:education:1", "schoolName": "University", "fieldOfStudy": "Math",
              "dateRange": {"start": {"year": 1830}, "end": {"year": 1835, "month": 6}}},
+            {"$type": "com.linkedin.voyager.dash.identity.profile.Position",
+             "entityUrn": "urn:position:1", "title": "Founder", "companyName": "Example",
+             "*profileTreasuryMediaPosition": "urn:collection:1"},
+            {"$type": "com.linkedin.restli.common.CollectionResponse",
+             "entityUrn": "urn:collection:1", "*elements": ["urn:media:1"]},
+            {"$type": "com.linkedin.voyager.dash.identity.profile.treasury.TreasuryMedia",
+             "entityUrn": "urn:media:1", "data": {"VectorImage": {"rootUrl": "https://media/",
+             "artifacts": [{"width": 160, "height": 160, "fileIdentifyingUrlPathSegment": "image.jpg"}]}}},
         ]}
         result = full_profile_summary(payload)
         self.assertEqual(result["name"], "Ada Lovelace")
@@ -86,6 +105,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["industry"], "Software")
         self.assertEqual(result["sections"]["education"][0]["start"], "1830")
         self.assertEqual(result["sections"]["education"][0]["end"], "1835-06")
+        self.assertEqual(result["sections"]["experience"][0]["media"][0]["url"], "https://media/image.jpg")
 
     def test_connection_summaries(self):
         urn = "urn:li:fsd_profile:abc"

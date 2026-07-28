@@ -54,6 +54,7 @@ linkedin profile show [PERSON] [--json] [--raw]
 linkedin connection list [-q QUERY] [-n LIMIT] [--json] [--raw]
 linkedin education update ID [fields] [--organization-id COMPANY_ID] [--yes]
 linkedin background update IMAGE [--yes]
+linkedin experience media add ID_OR_EXACT_COMPANY IMAGE [--yes]
 linkedin project delete ID_OR_EXACT_TITLE [--yes]
 linkedin invitations [-n LIMIT] [--start N] [--json] [--raw]
 linkedin api /voyager/api/...       # advanced, GET-only escape hatch
@@ -95,6 +96,11 @@ linkedin project delete "Old project title" --yes
 Background updates use LinkedIn's authenticated media-registration flow and
 signed binary upload URLs directly. PNG and JPEG images up to 8 MiB are
 accepted; the CLI does not open or control a browser.
+
+Experience media attachments use the same direct authenticated approach and
+preview by default. They add an image to the experience's media gallery; only
+association with an official LinkedIn organization page can change the small
+organization logo shown beside an experience.
 
 ## Development
 
