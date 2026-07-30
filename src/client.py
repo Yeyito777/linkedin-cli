@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -494,6 +495,94 @@ class Client:
                 f"LinkedIn project deletion returned HTTP {response.status_code}"
                 + (f": {detail}" if detail else "")
             )
+
+    def start_workplace_verification(self, email_address: str, company_id: str) -> str:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_address):
+            raise LinkedInError("invalid work email address")
+        if not re.fullmatch(r"\d+", company_id):
+            raise LinkedInError("company ID must be numeric")
+        session = self._curl_session()
+        headers = self._headers()
+        headers.pop("Cookie", None)
+        headers.update({"Content-Type": "application/json", "x-requested-with": "XMLHttpRequest"})
+        company_urn = f"urn:li:fsd_company:{company_id}"
+        verify = session.post(
+            BASE + "/voyager/api/voyagerHiringDashOrganizationEmailVerifications/",
+            params={"action": "verifyEmailAndCompany"}, headers=headers,
+            json={"emailAddress": email_address, "flowUseCase": "EMPLOYEE_VERIFICATION", "companyUrn": company_urn},
+            timeout=30,
+        )
+        if verify.status_code != 200:
+            detail = re.sub(r"\s+", " ", verify.text[:500]).strip()
+            raise LinkedInError(f"LinkedIn workplace email check returned HTTP {verify.status_code}" + (f": {detail}" if detail else ""))
+        try:
+            verification = verify.json()
+        except ValueError:
+            raise LinkedInError("LinkedIn returned an invalid workplace email response") from None
+        result = verification.get("value") or verification.get("data") or verification
+        verification_type = result.get("verificationType") if isinstance(result, dict) else None
+        if verification_type and verification_type != "VERIFIED":
+            raise LinkedInError(f"LinkedIn rejected the workplace email: {verification_type}")
+
+        send = session.post(
+            BASE + "/psettings/email/workEmailConfirmationMessages",
+            headers=headers,
+            json={"emailAddress": email_address, "emailKey": "email_job_posting_work_email_verification"},
+            timeout=30,
+        )
+        if send.status_code not in {200, 201}:
+            detail = re.sub(r"\s+", " ", send.text[:500]).strip()
+            raise LinkedInError(f"LinkedIn verification-code request returned HTTP {send.status_code}" + (f": {detail}" if detail else ""))
+        try:
+            sent = send.json()
+            challenge_id = sent.get("pinId") or sent.get("value") or sent.get("id")
+            if isinstance(challenge_id, dict):
+                challenge_id = challenge_id.get("pinId") or challenge_id.get("id")
+        except ValueError:
+            challenge_id = None
+        if not challenge_id:
+            raise LinkedInError("LinkedIn sent no verification challenge ID")
+        return str(challenge_id)
+
+    def complete_workplace_verification(
+        self, email_address: str, company_id: str, challenge_id: str, code: str,
+    ) -> None:
+        if not re.fullmatch(r"\d{6}", code):
+            raise LinkedInError("verification code must contain six digits")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", challenge_id):
+            raise LinkedInError("invalid verification challenge ID")
+        session = self._curl_session()
+        headers = self._headers()
+        headers.pop("Cookie", None)
+        headers.update({"Content-Type": "application/json", "x-requested-with": "XMLHttpRequest"})
+        verify = session.post(
+            f"{BASE}/checkpoint/challenges/emailVerificationChallenge/{challenge_id}",
+            params={"displayTime": int(time.time() * 1000)}, headers=headers,
+            json={"pin": code}, timeout=30,
+        )
+        if verify.status_code != 200:
+            detail = re.sub(r"\s+", " ", verify.text[:500]).strip()
+            raise LinkedInError(f"LinkedIn code verification returned HTTP {verify.status_code}" + (f": {detail}" if detail else ""))
+        try:
+            pin_result = verify.json()
+        except ValueError:
+            raise LinkedInError("LinkedIn returned an invalid code-verification response") from None
+        status = pin_result.get("status") or pin_result.get("value", {}).get("status")
+        if status and status != "SUCCESS":
+            raise LinkedInError(f"LinkedIn rejected the verification code: {status}")
+
+        save = session.post(
+            BASE + "/voyager/api/voyagerHiringDashOrganizationMemberVerifications/",
+            params={"action": "saveEmail"}, headers=headers,
+            json={
+                "companyUrn": f"urn:li:fsd_company:{company_id}",
+                "emailAddress": email_address, "challengeId": challenge_id,
+                "flowUseCase": "EMPLOYEE_VERIFICATION",
+            }, timeout=30,
+        )
+        if save.status_code not in {200, 201}:
+            detail = re.sub(r"\s+", " ", save.text[:500]).strip()
+            raise LinkedInError(f"LinkedIn workplace verification save returned HTTP {save.status_code}" + (f": {detail}" if detail else ""))
 
     def connections(self, count: int = 40, start: int = 0) -> dict[str, Any]:
         return self.get(

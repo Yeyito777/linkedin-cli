@@ -295,6 +295,42 @@ def command_experience_media_add(args: argparse.Namespace) -> None:
     print(f"Attached image. Experience ID: {preview['experience_id']}; asset: {asset}")
 
 
+def verification_path():
+    return session_path().with_name("pending-verification.json")
+
+
+def command_verification_workplace_start(args: argparse.Namespace) -> None:
+    email = (sys.stdin.read() if args.email_stdin else args.email or "").strip()
+    if not email:
+        raise LinkedInError("provide --email or --email-stdin")
+    if not args.yes:
+        print(f"Proposed workplace verification for LinkedIn company ID {args.company_id}.")
+        print("A six-digit code will be sent to the supplied work email.\n")
+        print("No code sent. Run again with --yes to continue.")
+        return
+    challenge_id = Client().start_workplace_verification(email, args.company_id)
+    path = verification_path()
+    path.write_text(json.dumps({"email": email, "company_id": args.company_id, "challenge_id": challenge_id}) + "\n")
+    path.chmod(0o600)
+    print("Verification code sent. Run `linkedin verification workplace complete CODE --yes` within 15 minutes.")
+
+
+def command_verification_workplace_complete(args: argparse.Namespace) -> None:
+    path = verification_path()
+    if not path.exists():
+        raise LinkedInError("no pending workplace verification; run the start command first")
+    pending = json.loads(path.read_text())
+    if not args.yes:
+        print(f"Proposed completion for LinkedIn company ID {pending['company_id']}.")
+        print("\nNo changes made. Run again with --yes to confirm the code.")
+        return
+    Client().complete_workplace_verification(
+        pending["email"], pending["company_id"], pending["challenge_id"], args.code,
+    )
+    path.unlink(missing_ok=True)
+    print("Workplace verification completed.")
+
+
 def command_api(args: argparse.Namespace) -> None:
     emit_json(Client().get(args.path))
 
@@ -378,6 +414,20 @@ def parser() -> argparse.ArgumentParser:
     experience_media_add.add_argument("--json", action="store_true", help="emit a JSON preview")
     experience_media_add.add_argument("--yes", action="store_true", help="upload and attach the image")
     experience_media_add.set_defaults(func=command_experience_media_add)
+    verification = sub.add_parser("verification", help="manage LinkedIn account verifications")
+    verification_sub = verification.add_subparsers(dest="verification_command", required=True)
+    workplace = verification_sub.add_parser("workplace", help="verify a current workplace by work email")
+    workplace_sub = workplace.add_subparsers(dest="workplace_command", required=True)
+    workplace_start = workplace_sub.add_parser("start", help="send a workplace verification code")
+    workplace_start.add_argument("--email")
+    workplace_start.add_argument("--email-stdin", action="store_true", help="read the work email from standard input")
+    workplace_start.add_argument("--company-id", default="22695", help="numeric LinkedIn company ID")
+    workplace_start.add_argument("--yes", action="store_true", help="send the code")
+    workplace_start.set_defaults(func=command_verification_workplace_start)
+    workplace_complete = workplace_sub.add_parser("complete", help="confirm a workplace verification code")
+    workplace_complete.add_argument("code", help="six-digit code received by work email")
+    workplace_complete.add_argument("--yes", action="store_true", help="verify and save the workplace")
+    workplace_complete.set_defaults(func=command_verification_workplace_complete)
     api = sub.add_parser("api", help="advanced read-only GET to a /voyager/api/ endpoint")
     api.add_argument("path", help="absolute /voyager/api/... path")
     api.set_defaults(func=command_api)

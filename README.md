@@ -55,6 +55,8 @@ linkedin connection list [-q QUERY] [-n LIMIT] [--json] [--raw]
 linkedin education update ID [fields] [--organization-id COMPANY_ID] [--yes]
 linkedin background update IMAGE [--yes]
 linkedin experience media add ID_OR_EXACT_COMPANY IMAGE [--yes]
+linkedin verification workplace start --email-stdin [--company-id ID] [--yes]
+linkedin verification workplace complete CODE [--yes]
 linkedin project delete ID_OR_EXACT_TITLE [--yes]
 linkedin invitations [-n LIMIT] [--start N] [--json] [--raw]
 linkedin api /voyager/api/...       # advanced, GET-only escape hatch
