@@ -295,6 +295,39 @@ def command_experience_media_add(args: argparse.Namespace) -> None:
     print(f"Attached image. Experience ID: {preview['experience_id']}; asset: {asset}")
 
 
+def command_experience_update(args: argparse.Namespace) -> None:
+    client = Client()
+    raw = client.own_profile()
+    profile = next((item for item in raw.get("included", []) if str(item.get("$type", "")).endswith(".Profile")), None)
+    positions = [item for item in raw.get("included", []) if str(item.get("$type", "")).endswith(".Position")]
+    matches = [item for item in positions if (
+        position_id(item) == args.experience
+        or str(item.get("companyName", "")).casefold() == args.experience.casefold()
+        or str(item.get("title", "")).casefold() == args.experience.casefold()
+    )]
+    if len(matches) != 1:
+        choices = ", ".join(f"{position_id(item)} ({item.get('title')} at {item.get('companyName')})" for item in positions) or "none"
+        raise LinkedInError(f"experience '{args.experience}' was not uniquely found. Available: {choices}")
+    if not profile:
+        raise LinkedInError("LinkedIn's profile response did not contain the current profile")
+    if not args.organization_id:
+        raise LinkedInError("no changes were supplied")
+    preview = {
+        "experience_id": position_id(matches[0]), "title": matches[0].get("title"),
+        "company": matches[0].get("companyName"), "organization_id": args.organization_id,
+    }
+    if not args.yes:
+        if args.json:
+            emit_json({"preview": True, **preview})
+        else:
+            print(f"Proposed experience update: {preview['title']} at {preview['company']}")
+            print(f"  Organization ID: {preview['organization_id']}")
+            print("\nNo changes made. Run again with --yes to apply.")
+        return
+    client.update_position_organization(matches[0], profile, args.organization_id)
+    print(f"Updated. Experience ID: {preview['experience_id']}")
+
+
 def verification_path():
     return session_path().with_name("pending-verification.json")
 
@@ -329,6 +362,38 @@ def command_verification_workplace_complete(args: argparse.Namespace) -> None:
     )
     path.unlink(missing_ok=True)
     print("Workplace verification completed.")
+
+
+def command_organization_create(args: argparse.Namespace) -> None:
+    info = image_file_info(args.logo) if args.logo else None
+    preview = {
+        "name": args.name, "public_name": args.public_name,
+        "industry": args.industry, "industry_id": args.industry_id,
+        "size": args.size, "type": args.type, "website": args.website,
+        "tagline": args.tagline, "logo": str(info["path"]) if info else None,
+    }
+    if not args.yes:
+        if args.json:
+            emit_json({"preview": True, **preview})
+        else:
+            print(f"Proposed LinkedIn Company Page: {args.name}")
+            for key, value in preview.items():
+                if key != "name" and value:
+                    print(f"  {key.replace('_', ' ').capitalize():<14} {value}")
+            print("\nNo Page created. Run again with --yes to apply.")
+        return
+    result = Client().create_organization(
+        name=args.name, universal_name=args.public_name,
+        industry_id=args.industry_id, industry_name=args.industry,
+        organization_size=args.size, organization_type=args.type,
+        tagline=args.tagline or "", website=args.website or "", logo_path=args.logo,
+    )
+    if args.json:
+        emit_json(result)
+    else:
+        organization_id = (result.get("value") or result.get("id") or result.get("entityUrn")
+                           or result.get("data", {}).get("value"))
+        print("Created LinkedIn Company Page" + (f": {organization_id}" if organization_id else "."))
 
 
 def command_api(args: argparse.Namespace) -> None:
@@ -414,6 +479,12 @@ def parser() -> argparse.ArgumentParser:
     experience_media_add.add_argument("--json", action="store_true", help="emit a JSON preview")
     experience_media_add.add_argument("--yes", action="store_true", help="upload and attach the image")
     experience_media_add.set_defaults(func=command_experience_media_add)
+    experience_update = experience_sub.add_parser("update", help="preview or update an experience")
+    experience_update.add_argument("experience", help="experience ID, exact company, or exact title")
+    experience_update.add_argument("--organization-id", help="associate a numeric LinkedIn company ID")
+    experience_update.add_argument("--json", action="store_true", help="emit a JSON preview")
+    experience_update.add_argument("--yes", action="store_true", help="apply the update")
+    experience_update.set_defaults(func=command_experience_update)
     verification = sub.add_parser("verification", help="manage LinkedIn account verifications")
     verification_sub = verification.add_subparsers(dest="verification_command", required=True)
     workplace = verification_sub.add_parser("workplace", help="verify a current workplace by work email")
@@ -428,6 +499,21 @@ def parser() -> argparse.ArgumentParser:
     workplace_complete.add_argument("code", help="six-digit code received by work email")
     workplace_complete.add_argument("--yes", action="store_true", help="verify and save the workplace")
     workplace_complete.set_defaults(func=command_verification_workplace_complete)
+    organization = sub.add_parser("organization", help="manage LinkedIn organization Pages")
+    organization_sub = organization.add_subparsers(dest="organization_command", required=True)
+    organization_create = organization_sub.add_parser("create", help="preview or create a Company Page")
+    organization_create.add_argument("name")
+    organization_create.add_argument("--public-name", required=True, help="linkedin.com/company/... suffix")
+    organization_create.add_argument("--industry", required=True)
+    organization_create.add_argument("--industry-id", required=True)
+    organization_create.add_argument("--size", default="SIZE_1")
+    organization_create.add_argument("--type", default="PRIVATELY_HELD")
+    organization_create.add_argument("--website")
+    organization_create.add_argument("--tagline")
+    organization_create.add_argument("--logo", help="PNG or JPEG logo, up to 8 MiB")
+    organization_create.add_argument("--json", action="store_true", help="emit a JSON preview or result")
+    organization_create.add_argument("--yes", action="store_true", help="create the Page")
+    organization_create.set_defaults(func=command_organization_create)
     api = sub.add_parser("api", help="advanced read-only GET to a /voyager/api/ endpoint")
     api.add_argument("path", help="absolute /voyager/api/... path")
     api.set_defaults(func=command_api)

@@ -408,6 +408,62 @@ class Client:
         # _sdui_request has already validated the response's actual error list.
         return str(asset)
 
+    def update_position_organization(
+        self, position: dict[str, Any], profile: dict[str, Any], company_id: str,
+    ) -> None:
+        if not re.fullmatch(r"\d+", company_id):
+            raise LinkedInError("company ID must be numeric")
+        position_id_value = position_id(position)
+        profile_id = internal_profile_id(profile)
+        vanity_name = profile.get("publicIdentifier")
+        if not position_id_value or not profile_id or not vanity_name:
+            raise LinkedInError("could not determine the profile and experience IDs")
+        session, _, _, headers = self._position_form_session(vanity_name, position_id_value)
+        prefix = f"auto-binding-{uuid.uuid4()}ProfilePositionForm"
+        ref = lambda key: {"key": key, "namespace": "MemoryNamespace"}
+        suffixes = {
+            "allowProfileEditBroadcasts": "allowProfileEditBroadcasts",
+            "title": "title", "employmentType": "employmentType",
+            "isCompanyRequired": "companyRequired", "organizationEntityId": "organizationEntityId",
+            "organizationId": "organizationId", "companyName": "companyName",
+            "startDate": "startDate", "endDate": "endDate", "description": "description",
+            "originalDescription": "initialDescription", "isCurrentPosition": "isCurrentPosition",
+            "endCurrentPositionIds": "endCurrentPositionIds", "location": "location",
+            "geoLocationId": "geoLocationId", "locationType": "locationType",
+            "headline": "headline", "shouldDynamicallyCreateHeadline": "dynamicallyCreateHeadline",
+            "jobSource": "jobSource", "showSourceOfHire": "displaySourceOfHire",
+            "skills": "ReorderableSkillsFormBindingsskillIdsBinding",
+            "isWevValidated": "isWevValidated", "aiSuggestionTrackingId": "aiSuggestionTrackingId",
+        }
+        references = {name: ref(prefix + suffix) for name, suffix in suffixes.items()}
+        references.update({
+            "uploadedMedia": ref("position-mediaList"),
+            "uploadedMediaAssetUrns": ref("position-mediaAssetUrns"),
+            "progressIndicator": ref("isActiveProfileFormLoadingProfileEditForm"),
+        })
+        payload = {
+            "profileId": profile_id, "positionId": position_id_value,
+            **references,
+            "hasChanges": ref("isActiveProfileFormHasChangesProfileEditForm"),
+            "hasExistingProfileSkills": True, "vanityName": vanity_name, "mediaItems": [],
+        }
+        requested = {
+            "$type": "proto.sdui.actions.requests.RequestedArguments",
+            "requestedStateKeys": [_requested_state(value["key"]) for value in references.values()],
+            "payload": payload,
+            "requestMetadata": {"$type": "proto.sdui.common.RequestMetadata"},
+        }
+        updated = dict(position)
+        updated["companyUrn"] = f"urn:li:fsd_company:{company_id}"
+        request_id = "com.linkedin.sdui.requests.profile.saveProfilePositionForm"
+        server_request = {
+            "requestId": request_id, "requestedArguments": requested,
+            "onClientRequestFailureAction": {"actions": []}, "isApfcEnabled": False,
+            "isStreaming": False, "rumPageKey": "",
+        }
+        states = position_save_states(payload, updated, profile)
+        self._sdui_request(session, headers, request_id, server_request, states)
+
     def register_media_upload(self, path: Path, media_upload_type: str) -> dict[str, Any]:
         info = image_file_info(path)
         payload = self.request(
@@ -583,6 +639,98 @@ class Client:
         if save.status_code not in {200, 201}:
             detail = re.sub(r"\s+", " ", save.text[:500]).strip()
             raise LinkedInError(f"LinkedIn workplace verification save returned HTTP {save.status_code}" + (f": {detail}" if detail else ""))
+
+    def create_organization(
+        self, *, name: str, universal_name: str, industry_id: str,
+        industry_name: str, organization_size: str, organization_type: str,
+        tagline: str = "", website: str = "", logo_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        if not name.strip() or len(name) > 100:
+            raise LinkedInError("organization name must contain 1 to 100 characters")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", universal_name):
+            raise LinkedInError("organization public name must use lowercase letters, numbers, and hyphens")
+        if not re.fullmatch(r"\d+", industry_id):
+            raise LinkedInError("industry ID must be numeric")
+        if len(tagline) > 120:
+            raise LinkedInError("organization tagline must be at most 120 characters")
+        valid_sizes = {
+            "SIZE_1", "SIZE_2_TO_10", "SIZE_11_TO_50", "SIZE_51_TO_200",
+            "SIZE_201_TO_500", "SIZE_501_TO_1000", "SIZE_1001_TO_5000",
+            "SIZE_5001_TO_10000", "SIZE_10001_OR_MORE",
+        }
+        valid_types = {
+            "PUBLIC_COMPANY", "SELF_EMPLOYED", "GOVERNMENT_AGENCY", "NON_PROFIT",
+            "SELF_OWNED", "PRIVATELY_HELD", "PARTNERSHIP",
+        }
+        if organization_size not in valid_sizes:
+            raise LinkedInError("invalid organization size")
+        if organization_type not in valid_types:
+            raise LinkedInError("invalid organization type")
+
+        session = self._curl_session()
+        headers = self._headers()
+        headers.pop("Cookie", None)
+        headers.update({
+            "Content-Type": "application/json", "Origin": BASE,
+            "Referer": BASE + "/company/setup/new/", "x-requested-with": "XMLHttpRequest",
+            "x-li-page-instance": "urn:li:page:flagship3_company_creation_form;",
+        })
+        eligibility = session.post(
+            BASE + "/voyager/api/voyagerOrganizationDashEntryPageCreationForm",
+            params={"action": "validatePageCreationForViewer"}, headers=headers,
+            json={}, timeout=30,
+        )
+        if eligibility.status_code not in {200, 204}:
+            detail = re.sub(r"\s+", " ", eligibility.text[:500]).strip()
+            raise LinkedInError(f"LinkedIn Page eligibility check returned HTTP {eligibility.status_code}" + (f": {detail}" if detail else ""))
+
+        logo_urn = ""
+        if logo_path is not None:
+            path = Path(logo_path).expanduser().resolve()
+            metadata = self.register_media_upload(path, "COMPANY_LOGO")
+            self.upload_registered_media(path, metadata)
+            logo_urn = str(metadata["urn"])
+
+        def text_input(item: str, value: str) -> dict[str, Any]:
+            return {"formElementUrn": f"urn:li:fsu_pageCreationFormItem:{item}",
+                    "formElementInputValues": [{"textInputValue": value}]}
+
+        def entity_input(item: str, entity_name: str, entity_urn: str | None = None) -> dict[str, Any]:
+            value = {"inputEntityName": entity_name}
+            if entity_urn:
+                value["inputEntityUrn"] = entity_urn
+            return {"formElementUrn": f"urn:li:fsu_pageCreationFormItem:{item}",
+                    "formElementInputValues": [{"entityInputValue": value}]}
+
+        inputs = [
+            text_input("NAME", name.strip()), text_input("UNIVERSAL_NAME", universal_name),
+            entity_input("INDUSTRY", industry_name, f"urn:li:fsd_industry:{industry_id}"),
+            entity_input("ORGANIZATION_SIZE", organization_size),
+            entity_input("ORGANIZATION_TYPE", organization_type),
+            entity_input("TERMS_AND_CONDITIONS", "TERMS_AND_CONDITIONS"),
+        ]
+        if website:
+            inputs.append(text_input("WEBSITE", website))
+        if tagline:
+            inputs.append(text_input("TAGLINE", tagline))
+        if logo_urn:
+            inputs.append({
+                "formElementUrn": "urn:li:fsu_pageCreationFormItem:LOGO",
+                "formElementInputValues": [{"urnInputValue": logo_urn}],
+            })
+        response = session.post(
+            BASE + "/voyager/api/voyagerOrganizationDashPageCreationForm",
+            params={"action": "createOrganization"}, headers=headers,
+            json={"organizationPageType": "COMPANY", "formElementInputs": inputs},
+            timeout=30,
+        )
+        if response.status_code not in {200, 201}:
+            detail = re.sub(r"\s+", " ", response.text[:800]).strip()
+            raise LinkedInError(f"LinkedIn Page creation returned HTTP {response.status_code}" + (f": {detail}" if detail else ""))
+        try:
+            return response.json()
+        except ValueError:
+            return {"status": response.status_code, "location": response.headers.get("location")}
 
     def connections(self, count: int = 40, start: int = 0) -> dict[str, Any]:
         return self.get(
@@ -807,7 +955,7 @@ def position_id(entity: dict[str, Any]) -> str | None:
 
 def position_save_states(
     payload: dict[str, Any], position: dict[str, Any], profile: dict[str, Any],
-    media_file: dict[str, Any], asset: str,
+    media_file: dict[str, Any] | None = None, asset: str | None = None,
 ) -> list[dict[str, Any]]:
     def key(name: str) -> str:
         reference = payload.get(name)
@@ -839,8 +987,8 @@ def position_save_states(
         ("shouldDynamicallyCreateHeadline", False, "booleanValue"),
         ("jobSource", "", "stringValue"), ("showSourceOfHire", False, "booleanValue"),
         ("skills", [], "stringListValue"),
-        ("uploadedMedia", {"$type": "proto.sdui.media.MediaList", "mediaFiles": [media_file]}, "mediaListValue"),
-        ("uploadedMediaAssetUrns", [asset], "stringListValue"),
+        ("uploadedMedia", {"$type": "proto.sdui.media.MediaList", "mediaFiles": [media_file] if media_file else []}, "mediaListValue"),
+        ("uploadedMediaAssetUrns", [asset] if asset else [], "stringListValue"),
         ("isWevValidated", True, "booleanValue"),
         ("progressIndicator", True, "booleanValue"),
     ]
